@@ -80,14 +80,15 @@ Phases run in order `replace`, `upload`, `metadata`, `links` (pick with `--phase
 Nothing is moved, renamed or deleted. Progress is in `data/output/s4/ledger.json`; a rerun skips what is done.
 
 ### Files in the wrong folder
-The DAM's move endpoint (`POST /api/internal/file/move`) is internal (browser sign-in), so the DAM
-team runs the moves. This writes the request bodies for them, in batches of 200:
+Unlinked files in the wrong folder are moved by the `relocate` phase (it runs first): upload the
+SharePoint PDF to the target folder, set all metadata on the new record, check its size, then delete
+the old record. The old record is re-checked live and kept if it has a link. Linked files never move.
 ```powershell
-python src/s4_move_list.py                   # unlinked files only
-python src/s4_move_list.py --include-linked  # add linked files, once a move test shows links survive
+python src/s4_sync.py --phase relocate --folder "AMMdrive/" --limit 1           # dry run, one file
+python src/s4_sync.py --phase relocate --folder "AMMdrive/" --apply --limit 1   # move one file
 ```
-Output: `data/output/s4/move_requests.json` and `move_list.csv`. After the moves, re-run steps 2 and 3
-before `s4_sync.py`, so replaces go to the files' new paths.
+`src/s4_move_list.py` writes the same moves as request bodies for the DAM's internal move endpoint,
+in case the DAM team runs them instead.
 
 ## Step 5 - Master register
 ```powershell

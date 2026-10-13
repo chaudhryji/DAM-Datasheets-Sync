@@ -1,18 +1,22 @@
 """Step 4: bring the DAM in line with SharePoint, using the step 3 plan. DRY-RUN BY DEFAULT.
 
 Phases (run in this order; each is resumable and can be run on its own with --phase):
+  relocate  files in the wrong folder that have NO long-term link: upload the SharePoint PDF to the
+            target folder, set all metadata on the new record, check it, then delete the old record.
+            The old record is re-checked live and kept if it has a link. Linked files are never moved.
   replace   changed content: upload the SharePoint PDF to the file's CURRENT DAM path, so the
             same record (and its long-term link) is updated in place. Stops if the id changes.
   upload    new datasheets: upload to the target folder.
   metadata  set every ds* key to the SharePoint value, exactly once per key (no duplicates).
   links     create a long-term link where none exists; existing links are never touched.
 
-Not done here: moving files between folders (no move endpoint in the API spec yet) and
-deleting anything. Files in the wrong folder keep their place; their metadata is corrected.
+Not done here: moving linked files (they keep their place; their metadata is corrected) and
+deleting anything other than the old copy of a relocated, unlinked file.
 
   python src/s4_sync.py                              # dry run, all phases, all files
   python src/s4_sync.py --folder "Ultrasync/"        # dry run for one folder (pilot)
   python src/s4_sync.py --folder "Ultrasync/" --apply --limit 5
+  python src/s4_sync.py --phase relocate --folder "AMMdrive/" --apply --limit 1   # one-file move test
 Every action (dry or real) is written to logs/audit_<date>.jsonl; progress to data/output/s4/ledger.json.
 """
 import argparse
@@ -29,7 +33,7 @@ from common.dam_writer import DamWriter  # noqa: E402
 
 S1, S3, OUT = env.output_dir("s1"), env.output_dir("s3"), env.output_dir("s4")
 LEDGER = OUT / "ledger.json"
-PHASES = ["replace", "upload", "metadata", "links"]
+PHASES = ["relocate", "replace", "upload", "metadata", "links"]
 CHECKPOINT_EVERY = 25
 
 
@@ -85,7 +89,7 @@ def main():
     schema = {s["key"]: s["id"] for s in dam.get("/metadata-schema")}
     ledger = load_ledger() if args.apply else {}
     graph, drive_id = None, None
-    if args.apply and {"replace", "upload"} & set(phases):
+    if args.apply and {"relocate", "replace", "upload"} & set(phases):
         from common.graph import Graph
         graph = Graph()
         drive_id = json.loads((S1 / "library_info.json").read_text(encoding="utf-8"))["drive"]["id"]
@@ -103,11 +107,14 @@ def main():
             e = entry(p)
             if phase in e["done"]:
                 continue
-            if phase == "replace" and p["content"] == "REPLACE":
+            moving = p["placement"] == "MOVE"
+            if phase == "relocate" and moving and p["target_folder"]:
+                todo.append(p)
+            elif phase == "replace" and p["content"] == "REPLACE" and not moving:
                 todo.append(p)
             elif phase == "upload" and p["content"] == "UPLOAD" and p["target_folder"]:
                 todo.append(p)
-            elif phase == "metadata" and (e["dam_id"] or not args.apply) and (
+            elif phase == "metadata" and not moving and (e["dam_id"] or not args.apply) and (
                     p["content"] == "UPLOAD" or p["metadata_to_set"] or p.get("dup_metadata_keys")):
                 todo.append(p)
             elif phase == "links" and p["link"] == "CREATE_LINK" and (e["dam_id"] or not args.apply):
@@ -118,7 +125,30 @@ def main():
         for i, p in enumerate(todo, 1):
             e = entry(p)
             ctx = {"file": p["file_name"], "phase": phase}
-            if phase in ("replace", "upload"):
+            if phase == "relocate":
+                old_id, path = p["dam_id"], p["target_folder"] + dam_name(p, args.name_mode)
+                if args.apply:
+                    live_links = [l for l in (dam.get(f"/file/{old_id}/link", allow_404=True) or []) if not l.get("expiresAt")]
+                    if live_links:
+                        dam.audit("relocate.skipped_linked", file_id=old_id, **ctx)
+                        stats["relocate skipped (has link now)"] += 1
+                        continue
+                data = graph.download(drive_id, p["spo_drive_item_id"]) if args.apply else b""
+                if args.apply and len(data) != p["spo_size"]:
+                    raise SystemExit(f"Size mismatch downloading {p['file_name']}: {len(data)} != {p['spo_size']}")
+                rec = dam.upload(path, data, **ctx, spo_size=p["spo_size"], moving_from=p["dam_folder"])
+                if args.apply:
+                    if not rec or rec.get("id") == old_id or rec.get("sizeBytes") != p["spo_size"]:
+                        save_ledger(ledger)
+                        raise SystemExit(f"STOP: upload of {path} did not give a new record of the right size: {rec}. "
+                                         f"Old file {old_id} was NOT deleted.")
+                    e.update(dam_id=rec["id"], old_dam_id=old_id, old_folder=p["dam_folder"])
+                want = {k: dam_value(k, v) for k, v in p["expected_metadata"].items() if v}
+                dam.set_metadata(e["dam_id"], want, schema, current=None if args.apply else [], **ctx)
+                dam.delete_file(old_id, links=None if args.apply else [], **ctx)
+                if args.apply:
+                    e["done"].append("metadata")
+            elif phase in ("replace", "upload"):
                 folder = p["dam_folder"] if phase == "replace" else p["target_folder"]
                 path = folder + dam_name(p, args.name_mode)
                 data = graph.download(drive_id, p["spo_drive_item_id"]) if args.apply else b""
@@ -156,8 +186,7 @@ def main():
             save_ledger(ledger)
 
     print(f"\n{mode} finished: " + ", ".join(f"{k} {n:,}" for k, n in stats.items()))
-    print(f"Not handled here: {sum(1 for p in plan if p['placement'] == 'MOVE'):,} files to move (waiting for a move endpoint), "
-          f"{sum(1 for p in plan if p['placement'] == 'KEEP_PROTECTED'):,} linked files kept in their current folder.")
+    print(f"Not moved: {sum(1 for p in plan if p['placement'] == 'KEEP_PROTECTED'):,} linked files kept in their current folder.")
     print(f"Audit log: {dam.audit_path}")
     if not args.apply:
         print("Nothing was changed. Review the audit log, then re-run with --apply.")

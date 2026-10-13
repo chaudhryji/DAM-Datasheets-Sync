@@ -4,7 +4,8 @@ Safety rules enforced here, not left to callers:
   - every intended or real write goes to the append-only audit log (logs/audit_<date>.jsonl)
   - delete_file refuses a file that has a long-term link (re-checked live), unless the caller
     passes allow_linked=True (used only by the throwaway link test)
-  - no endpoint for moving or renaming files is used (not in the public API spec)
+  - no endpoint for moving or renaming files is used (the move endpoint is internal-only);
+    an unlinked file is moved as upload-to-new-folder, verify, then delete the old record
 """
 import json
 import time
@@ -68,8 +69,9 @@ class DamWriter(DamReader):
         self.audit("upload.done", path=path, file_id=(rec or {}).get("id"), size=(rec or {}).get("sizeBytes"), **ctx)
         return rec
 
-    def delete_file(self, file_id: str, allow_linked: bool = False, **ctx):
-        links = self.get(f"/file/{file_id}/link", allow_404=True) or []
+    def delete_file(self, file_id: str, allow_linked: bool = False, links: list | None = None, **ctx):
+        if links is None or self.apply:  # real deletes always re-check live
+            links = self.get(f"/file/{file_id}/link", allow_404=True) or []
         if any(not l.get("expiresAt") for l in links) and not allow_linked:
             self.audit("delete.refused_linked", file_id=file_id, **ctx)
             raise RuntimeError(f"Refusing to delete {file_id}: it has a long-term link")
