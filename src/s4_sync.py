@@ -127,6 +127,23 @@ def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, 
         print(f"\n== {phase}: {len(todo):,} files")
         t0, done_n, lock = time.monotonic(), 0, LEDGER_LOCK
 
+        def fetch(p, ctx):
+            """SharePoint bytes for p. If the size differs from step 1, the file changed in SharePoint
+            since the inventory: accept the new bytes when SharePoint's current size matches the download
+            (SharePoint is the source of truth); otherwise skip the file for the next run."""
+            if not args.apply:
+                return b"", p["spo_size"]
+            data = graph.download(drive_id, p["spo_drive_item_id"])
+            if len(data) != p["spo_size"]:
+                now = graph.get(f"/drives/{drive_id}/items/{p['spo_drive_item_id']}").get("size")
+                if now != len(data):
+                    raise RuntimeError(f"size mismatch: downloaded {len(data)}, SharePoint says {now}, "
+                                       f"inventory {p['spo_size']}")
+                dam.audit("download.size_changed", inventory_size=p["spo_size"], size=len(data), **ctx)
+                print(f"  {p['file_name']} changed in SharePoint since the inventory "
+                      f"({p['spo_size']:,} -> {len(data):,} bytes), syncing the current version", flush=True)
+            return data, len(data)
+
         def do_one(p):
             e = entry(p)
             ctx = {"file": p["file_name"], "phase": phase}
@@ -137,12 +154,10 @@ def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, 
                     if live_links:
                         dam.audit("relocate.skipped_linked", file_id=old_id, **ctx)
                         return "relocate skipped (has link now)"
-                data = graph.download(drive_id, p["spo_drive_item_id"]) if args.apply else b""
-                if args.apply and len(data) != p["spo_size"]:
-                    raise SystemExit(f"Size mismatch downloading {p['file_name']}: {len(data)} != {p['spo_size']}")
-                rec = dam.upload(path, data, **ctx, spo_size=p["spo_size"], moving_from=p["dam_folder"])
+                data, size = fetch(p, ctx)
+                rec = dam.upload(path, data, **ctx, spo_size=size, moving_from=p["dam_folder"])
                 if args.apply:
-                    if not rec or rec.get("id") == old_id or rec.get("sizeBytes") != p["spo_size"]:
+                    if not rec or rec.get("id") == old_id or rec.get("sizeBytes") != size:
                         save_ledger(ledger)
                         raise SystemExit(f"STOP: upload of {path} did not give a new record of the right size: {rec}. "
                                          f"Old file {old_id} was NOT deleted.")
@@ -157,10 +172,8 @@ def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, 
             elif phase in ("replace", "upload"):
                 folder = p["dam_folder"] if phase == "replace" else p["target_folder"]
                 path = folder + dam_name(p, args.name_mode)
-                data = graph.download(drive_id, p["spo_drive_item_id"]) if args.apply else b""
-                if args.apply and len(data) != p["spo_size"]:
-                    raise SystemExit(f"Size mismatch downloading {p['file_name']}: {len(data)} != {p['spo_size']}")
-                rec = dam.upload(path, data, **ctx, spo_size=p["spo_size"])
+                data, size = fetch(p, ctx)
+                rec = dam.upload(path, data, **ctx, spo_size=size)
                 if args.apply:
                     if phase == "replace" and rec["id"] != p["dam_id"]:
                         dam.audit("replace.id_changed", old=p["dam_id"], new=rec["id"], **ctx)

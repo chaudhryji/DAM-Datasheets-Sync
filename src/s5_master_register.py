@@ -8,7 +8,7 @@ Sheets:
 
 Reads the step 3 plan (data/output/s3) and, if present, the step 4 ledger (ids and links created by a sync).
 For the final register after a sync, re-run steps 2 and 3 first so every value is read back from the DAM:
-  python src/s2_dam_inventory.py; python src/s3_compare.py; python src/s5_master_register.py
+  python src/s2_dam_inventory.py && python src/s3_compare.py && python src/s5_master_register.py
 Writes data/output/s5/datasheet_register.xlsx and datasheet_register.csv (same Datasheets sheet, UTF-8).
 """
 import csv
