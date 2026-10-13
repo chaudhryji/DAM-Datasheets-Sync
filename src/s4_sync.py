@@ -183,7 +183,7 @@ def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, 
                     rate = done_n / max(time.monotonic() - t0, 1e-6)
                     eta = (len(todo) - done_n) / rate if rate else 0
                     print(f"  {done_n:,}/{len(todo):,} ({done_n / len(todo):.0%})  {rate * 60:,.0f} files/min  "
-                          f"~{eta / 60:,.0f} min left  last: {p['file_name']}", flush=True)
+                          f"~{eta / 60:,.0f} min left  last: {dam_name(p, args.name_mode)}", flush=True)
 
         def safe_one(p):
             """Network trouble that outlasts the retries skips this file (it stays not-done, so the
