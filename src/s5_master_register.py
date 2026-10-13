@@ -92,8 +92,11 @@ def write_sheet(wb, title, headers, widths, rows):
 
 def main():
     plan = [json.loads(l) for l in (S3 / "plan.jsonl").open(encoding="utf-8")]
-    ledger_path = S4 / "ledger.json"
-    ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.exists() else {}
+    ledger = {}
+    for f in sorted(S4.glob("ledger*.json")):  # ledger.json plus ledger_<name>.json from parallel runs
+        for k, v in json.loads(f.read_text(encoding="utf-8")).items():
+            if k not in ledger or len(v.get("done", [])) > len(ledger[k].get("done", [])):
+                ledger[k] = v
     comparison = list(csv.DictReader((S3 / "comparison.csv").open(encoding="utf-8-sig")))
 
     headers = [c[0] for c in COLUMNS]

@@ -18,6 +18,7 @@ deleting anything other than the old copy of a relocated, unlinked file.
   python src/s4_sync.py --folder "Ultrasync/" --apply --limit 5
   python src/s4_sync.py --phase relocate --folder "AMMdrive/" --apply --limit 1   # one-file move test
 Every action (dry or real) is written to logs/audit_<date>.jsonl; progress to data/output/s4/ledger.json.
+Two windows at once: give each its own folder and --ledger name; every run reads all ledger files.
 """
 import argparse
 import json
@@ -39,7 +40,14 @@ CHECKPOINT_EVERY = 25
 
 
 def load_ledger() -> dict:
-    return json.loads(LEDGER.read_text(encoding="utf-8")) if LEDGER.exists() else {}
+    """Merge ledger.json and every ledger_<name>.json (written by parallel runs).
+    For a file seen in several, the entry with the most finished phases wins."""
+    merged = {}
+    for f in sorted(OUT.glob("ledger*.json")):
+        for k, v in json.loads(f.read_text(encoding="utf-8")).items():
+            if k not in merged or len(v.get("done", [])) > len(merged[k].get("done", [])):
+                merged[k] = v
+    return merged
 
 
 def save_ledger(ledger: dict):
@@ -169,11 +177,16 @@ def main():
     ap.add_argument("--phase", choices=PHASES, action="append", help="run only these phases")
     ap.add_argument("--folder", help="only files whose target or current DAM folder is this, e.g. 'Ultrasync/'")
     ap.add_argument("--progress", type=int, default=10, help="print a progress line every N files (default 10)")
+    ap.add_argument("--ledger", help="progress file name for a run in a second window, e.g. 'uni' -> ledger_uni.json. "
+                                     "Parallel runs must each use their own name and work on different folders.")
     ap.add_argument("--limit", type=int, help="stop after this many files per phase")
     ap.add_argument("--name-mode", choices=["decode", "keep"], default="decode",
                     help="new uploads: write '%%C2%%BD' as '½' like the existing DAM files (default) or keep as-is")
     args = ap.parse_args()
     phases = args.phase or PHASES
+    if args.ledger:
+        global LEDGER
+        LEDGER = OUT / f"ledger_{''.join(c for c in args.ledger if c.isalnum() or c in '-_')}.json"
 
     plan = [json.loads(l) for l in (S3 / "plan.jsonl").open(encoding="utf-8")]
     plan = [p for p in plan if not ({p["target_folder"].split("/", 1)[0] + "/", p["dam_folder"].split("/", 1)[0] + "/"}
