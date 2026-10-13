@@ -71,36 +71,7 @@ def snapshot_md(p: dict) -> list:
     return md
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--apply", action="store_true", help="really write to the DAM (default: dry run)")
-    ap.add_argument("--phase", choices=PHASES, action="append", help="run only these phases")
-    ap.add_argument("--folder", help="only files whose target or current DAM folder is this, e.g. 'Ultrasync/'")
-    ap.add_argument("--limit", type=int, help="stop after this many files per phase")
-    ap.add_argument("--name-mode", choices=["decode", "keep"], default="decode",
-                    help="new uploads: write '%%C2%%BD' as '½' like the existing DAM files (default) or keep as-is")
-    args = ap.parse_args()
-    phases = args.phase or PHASES
-
-    plan = [json.loads(l) for l in (S3 / "plan.jsonl").open(encoding="utf-8")]
-    if args.folder:
-        plan = [p for p in plan if args.folder in (p["target_folder"], p["dam_folder"])]
-    dam = DamWriter(apply=args.apply)
-    schema = {s["key"]: s["id"] for s in dam.get("/metadata-schema")}
-    ledger = load_ledger() if args.apply else {}
-    graph, drive_id = None, None
-    if args.apply and {"relocate", "replace", "upload"} & set(phases):
-        from common.graph import Graph
-        graph = Graph()
-        drive_id = json.loads((S1 / "library_info.json").read_text(encoding="utf-8"))["drive"]["id"]
-
-    mode = "APPLY" if args.apply else "DRY-RUN"
-    print(f"{mode}: {len(plan):,} datasheets in scope, phases {', '.join(phases)}")
-    stats = Counter()
-
-    def entry(p):
-        return ledger.setdefault(p["file_name"], {"dam_id": p["dam_id"] or None, "done": []})
-
+def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, entry):
     for phase in phases:
         todo = []
         for p in plan:
@@ -185,6 +156,43 @@ def main():
         if args.apply:
             save_ledger(ledger)
 
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--apply", action="store_true", help="really write to the DAM (default: dry run)")
+    ap.add_argument("--phase", choices=PHASES, action="append", help="run only these phases")
+    ap.add_argument("--folder", help="only files whose target or current DAM folder is this, e.g. 'Ultrasync/'")
+    ap.add_argument("--limit", type=int, help="stop after this many files per phase")
+    ap.add_argument("--name-mode", choices=["decode", "keep"], default="decode",
+                    help="new uploads: write '%%C2%%BD' as '½' like the existing DAM files (default) or keep as-is")
+    args = ap.parse_args()
+    phases = args.phase or PHASES
+
+    plan = [json.loads(l) for l in (S3 / "plan.jsonl").open(encoding="utf-8")]
+    if args.folder:
+        plan = [p for p in plan if args.folder in (p["target_folder"], p["dam_folder"])]
+    dam = DamWriter(apply=args.apply)
+    schema = {s["key"]: s["id"] for s in dam.get("/metadata-schema")}
+    ledger = load_ledger() if args.apply else {}
+    graph, drive_id = None, None
+    if args.apply and {"relocate", "replace", "upload"} & set(phases):
+        from common.graph import Graph
+        graph = Graph()
+        drive_id = json.loads((S1 / "library_info.json").read_text(encoding="utf-8"))["drive"]["id"]
+
+    mode = "APPLY" if args.apply else "DRY-RUN"
+    print(f"{mode}: {len(plan):,} datasheets in scope, phases {', '.join(phases)}")
+    stats = Counter()
+
+    def entry(p):
+        return ledger.setdefault(p["file_name"], {"dam_id": p["dam_id"] or None, "done": []})
+
+    try:
+        run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, entry)
+    finally:
+        if args.apply:
+            save_ledger(ledger)  # also on a crash, so a rerun skips what was already done
     print(f"\n{mode} finished: " + ", ".join(f"{k} {n:,}" for k, n in stats.items()))
     print(f"Not moved: {sum(1 for p in plan if p['placement'] == 'KEEP_PROTECTED'):,} linked files kept in their current folder.")
     print(f"Audit log: {dam.audit_path}")

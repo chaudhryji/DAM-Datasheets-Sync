@@ -77,7 +77,12 @@ class DamWriter(DamReader):
             raise RuntimeError(f"Refusing to delete {file_id}: it has a long-term link")
         self.audit("delete", file_id=file_id, **ctx)
         if self.apply:
-            self._send("DELETE", f"/file/{file_id}")
+            try:
+                self._send("DELETE", f"/file/{file_id}")
+            except RuntimeError as exc:
+                if "HTTP 404" not in str(exc):
+                    raise
+                self.audit("delete.already_gone", file_id=file_id, **ctx)  # e.g. rerun after a crash
 
     # ---- metadata -------------------------------------------------------------
     def set_metadata(self, file_id: str, values: dict, schema_ids: dict, current: list | None = None, **ctx):
