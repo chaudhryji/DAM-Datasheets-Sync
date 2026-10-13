@@ -17,6 +17,11 @@ from common import env
 from common.dam import DamReader
 
 
+# Root folders in the datasheet container that do not come from the SharePoint datasheet site
+# (uni components etc.). Never written to by this sync.
+PROTECTED_ROOTS = {"CAD Files/", "Downloads/", "2D Drawings/", "Megadynegroup Resources/", "Plastic and Steel Chains/"}
+
+
 class DamWriter(DamReader):
     def __init__(self, apply: bool = False, write_throttle: float = 0.2, **kw):
         super().__init__(**kw)
@@ -52,22 +57,37 @@ class DamWriter(DamReader):
     # ---- files ----------------------------------------------------------------
     def upload(self, path: str, data: bytes, content_type: str = "application/pdf", **ctx) -> dict | None:
         """Upload to container/path. If a file already exists at that path, the DAM updates
-        that record in place (same file id), which is how content is replaced."""
+        that record in place (same file id), which is how content is replaced.
+        A failed step restarts the whole sequence (new reservation, blob PUT, complete): the DAM
+        drops the reservation after a failed complete, so retrying complete alone cannot work."""
+        if path.split("/", 1)[0] + "/" in PROTECTED_ROOTS:
+            raise RuntimeError(f"Refusing to write {path}: that folder is not part of the datasheet sync")
         self.audit("upload", path=path, bytes=len(data), **ctx)
         if not self.apply:
             return None
-        sas = self.get("/file/upload-url", {"containerId": self.container, "path": path})["url"]
+        last = None
         for attempt in range(4):
-            r = requests.put(sas, data=data, timeout=300,
-                             headers={"x-ms-blob-type": "BlockBlob", "Content-Type": content_type})
-            if r.ok:
-                break
-            time.sleep(2 ** attempt)
-        else:
-            raise RuntimeError(f"Blob PUT for {path} failed: HTTP {r.status_code} {r.text[:200]}")
-        rec = self._send("POST", "/file/upload/complete", json={"containerId": self.container, "path": path})
-        self.audit("upload.done", path=path, file_id=(rec or {}).get("id"), size=(rec or {}).get("sizeBytes"), **ctx)
-        return rec
+            if attempt:
+                time.sleep(2 ** attempt)
+                self.audit("upload.retry", path=path, attempt=attempt, error=str(last)[:300], **ctx)
+                print(f"  retrying upload of {path} ({last})", flush=True)
+            try:
+                sas = self.get("/file/upload-url", {"containerId": self.container, "path": path})["url"]
+                r = requests.put(sas, data=data, timeout=300,
+                                 headers={"x-ms-blob-type": "BlockBlob", "Content-Type": content_type})
+                if not r.ok:
+                    raise RuntimeError(f"blob PUT HTTP {r.status_code} {r.text[:200]}")
+                resp = self.session.post(self.base + "/file/upload/complete", timeout=self.timeout,
+                                         json={"containerId": self.container, "path": path})
+                if not resp.ok:
+                    raise RuntimeError(f"complete HTTP {resp.status_code} {resp.text[:200]}")
+                rec = resp.json()
+            except (RuntimeError, requests.RequestException) as exc:
+                last = exc
+                continue
+            self.audit("upload.done", path=path, file_id=rec.get("id"), size=rec.get("sizeBytes"), **ctx)
+            return rec
+        raise RuntimeError(f"Upload of {path} failed after retries: {last}")
 
     def delete_file(self, file_id: str, allow_linked: bool = False, links: list | None = None, **ctx):
         if links is None or self.apply:  # real deletes always re-check live

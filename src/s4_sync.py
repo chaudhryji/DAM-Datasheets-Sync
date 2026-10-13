@@ -29,7 +29,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import env  # noqa: E402
-from common.dam_writer import DamWriter  # noqa: E402
+from common.dam_writer import PROTECTED_ROOTS, DamWriter  # noqa: E402
 
 S1, S3, OUT = env.output_dir("s1"), env.output_dir("s3"), env.output_dir("s4")
 LEDGER = OUT / "ledger.json"
@@ -170,6 +170,8 @@ def main():
     phases = args.phase or PHASES
 
     plan = [json.loads(l) for l in (S3 / "plan.jsonl").open(encoding="utf-8")]
+    plan = [p for p in plan if not ({p["target_folder"].split("/", 1)[0] + "/", p["dam_folder"].split("/", 1)[0] + "/"}
+                                    & PROTECTED_ROOTS)]
     if args.folder:
         plan = [p for p in plan if args.folder in (p["target_folder"], p["dam_folder"])]
     dam = DamWriter(apply=args.apply)
