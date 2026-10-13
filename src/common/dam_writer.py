@@ -45,7 +45,12 @@ class DamWriter(DamReader):
         url = self.base + path
         for attempt in range(6):
             time.sleep(self.write_throttle)
-            resp = self.session.request(method, url, timeout=self.timeout, **kw)
+            try:
+                resp = self.session.request(method, url, timeout=self.timeout, **kw)
+            except requests.RequestException as exc:  # connection reset, timeout: wait and retry
+                print(f"  DAM connection error on {method} {path} ({exc.__class__.__name__}), retrying", flush=True)
+                time.sleep(2 ** attempt)
+                continue
             if resp.status_code in (429, 500, 502, 503, 504):
                 wait = int(resp.headers.get("Retry-After", 2 ** attempt))
                 print(f"  HTTP {resp.status_code} on {method} {path}, retrying in {wait}s", flush=True)

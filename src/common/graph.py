@@ -92,7 +92,12 @@ class Graph:
         """Read a file's bytes from SharePoint. Read-only."""
         url = f"{GRAPH}/drives/{drive_id}/items/{item_id}/content"
         for attempt in range(6):
-            resp = self.session.get(url, timeout=self.timeout, allow_redirects=True)
+            try:
+                resp = self.session.get(url, timeout=self.timeout, allow_redirects=True)
+            except requests.RequestException as exc:  # connection reset, timeout: wait and retry
+                print(f"  SharePoint connection error ({exc.__class__.__name__}), retrying", flush=True)
+                time.sleep(2 ** attempt)
+                continue
             if resp.status_code == 401 and attempt == 0:
                 self._auth()
                 continue

@@ -31,6 +31,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+import requests
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import env  # noqa: E402
 from common.dam_writer import PROTECTED_ROOTS, DamWriter  # noqa: E402
@@ -183,12 +185,22 @@ def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, 
                     print(f"  {done_n:,}/{len(todo):,} ({done_n / len(todo):.0%})  {rate * 60:,.0f} files/min  "
                           f"~{eta / 60:,.0f} min left  last: {p['file_name']}", flush=True)
 
+        def safe_one(p):
+            """Network trouble that outlasts the retries skips this file (it stays not-done, so the
+            next run retries it). Safety STOPs (SystemExit) are not caught and end the run."""
+            try:
+                return do_one(p)
+            except (RuntimeError, requests.RequestException) as exc:
+                dam.audit("file.failed", file=p["file_name"], phase=phase, error=str(exc)[:300])
+                print(f"  FAILED {p['file_name']} ({str(exc)[:120]}), will retry on the next run", flush=True)
+                return "failed (retry next run)"
+
         if args.workers <= 1:
             for p in todo:
-                finished(p, do_one(p))
+                finished(p, safe_one(p))
         else:
             with ThreadPoolExecutor(max_workers=args.workers) as pool:
-                futures = {pool.submit(do_one, p): p for p in todo}
+                futures = {pool.submit(safe_one, p): p for p in todo}
                 try:
                     for f in as_completed(futures):
                         finished(futures[f], f.result())  # a STOP in any worker ends the run
