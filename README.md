@@ -40,3 +40,11 @@ Outputs land in `data/output/s1/` (git-ignored):
 Sign-in uses the app registration in `SPO_CLIENT_ID` with delegated `Sites.Read.All`
 (Microsoft Graph). It only reads. If the sign-in says the app lacks that permission,
 an admin needs to grant it to the app registration.
+
+## Step 2 - DAM inventory (read-only)
+Fill `DAM_API_KEY`, `DAM_USER_EMAIL` and `DAM_CONTAINER_ID` in `.env`, then:
+```powershell
+python src/s2_dam_probe.py       # quick check of the key and record shapes
+python src/s2_dam_inventory.py   # full crawl: folders, files, links, metadata (resumable)
+```
+Outputs land in `data/output/s2/`: `dam_files.csv`, `dam_folders.csv`, `dam_summary.md`.
