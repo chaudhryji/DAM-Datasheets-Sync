@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -93,6 +94,7 @@ def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, 
         if args.limit:
             todo = todo[:args.limit]
         print(f"\n== {phase}: {len(todo):,} files")
+        t0 = time.monotonic()
         for i, p in enumerate(todo, 1):
             e = entry(p)
             ctx = {"file": p["file_name"], "phase": phase}
@@ -151,8 +153,11 @@ def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, 
                 e["ts"] = datetime.now(timezone.utc).isoformat()
                 if i % CHECKPOINT_EVERY == 0:
                     save_ledger(ledger)
-            if i % 500 == 0:
-                print(f"  {i:,}/{len(todo):,}", flush=True)
+            if i % args.progress == 0 or i == len(todo):
+                rate = i / max(time.monotonic() - t0, 1e-6)
+                eta = (len(todo) - i) / rate if rate else 0
+                print(f"  {i:,}/{len(todo):,} ({i / len(todo):.0%})  {rate * 60:,.0f} files/min  "
+                      f"~{eta / 60:,.0f} min left  last: {p['file_name']}", flush=True)
         if args.apply:
             save_ledger(ledger)
 
@@ -163,6 +168,7 @@ def main():
     ap.add_argument("--apply", action="store_true", help="really write to the DAM (default: dry run)")
     ap.add_argument("--phase", choices=PHASES, action="append", help="run only these phases")
     ap.add_argument("--folder", help="only files whose target or current DAM folder is this, e.g. 'Ultrasync/'")
+    ap.add_argument("--progress", type=int, default=10, help="print a progress line every N files (default 10)")
     ap.add_argument("--limit", type=int, help="stop after this many files per phase")
     ap.add_argument("--name-mode", choices=["decode", "keep"], default="decode",
                     help="new uploads: write '%%C2%%BD' as '½' like the existing DAM files (default) or keep as-is")
