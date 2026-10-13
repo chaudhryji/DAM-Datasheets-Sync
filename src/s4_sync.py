@@ -21,6 +21,7 @@ Every action (dry or real) is written to logs/audit_<date>.jsonl; progress to da
 Two windows at once: give each its own folder and --ledger name; every run reads all ledger files.
 """
 import argparse
+import csv
 import json
 import os
 import sys
@@ -61,6 +62,21 @@ def save_ledger(ledger: dict):
         text = json.dumps(ledger, ensure_ascii=False)
     tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, LEDGER)
+
+
+def blocked_items() -> set:
+    """Item numbers that must never be loaded, replaced, moved or linked (config/skip_items.csv)."""
+    f = env.ROOT / "config" / "skip_items.csv"
+    if not f.exists():
+        return set()
+    with f.open(encoding="utf-8-sig") as fh:
+        return {r["item_no"].strip().lstrip("0") for r in csv.DictReader(fh) if r.get("item_no", "").strip()}
+
+
+def is_blocked(p: dict, blocked: set) -> bool:
+    no = (p.get("expected_metadata") or {}).get("dsitemno", "").lstrip("0")
+    code = p.get("item_code") or ""
+    return no in blocked or any(code.endswith(b) for b in blocked)
 
 
 def dam_name(row: dict, name_mode: str) -> str:
@@ -234,6 +250,11 @@ def main():
     plan = [json.loads(l) for l in (S3 / "plan.jsonl").open(encoding="utf-8")]
     plan = [p for p in plan if not ({p["target_folder"].split("/", 1)[0] + "/", p["dam_folder"].split("/", 1)[0] + "/"}
                                     & PROTECTED_ROOTS)]
+    blocked = blocked_items()
+    held = [p for p in plan if is_blocked(p, blocked)]
+    plan = [p for p in plan if not is_blocked(p, blocked)]
+    if held:
+        print(f"Skipping {len(held)} files of blocked items {', '.join(sorted(blocked))} (config/skip_items.csv)")
     if args.folder:
         plan = [p for p in plan if args.folder in (p["target_folder"], p["dam_folder"])]
     dam = DamWriter(apply=args.apply)

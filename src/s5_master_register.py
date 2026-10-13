@@ -23,6 +23,7 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import env  # noqa: E402
+from s4_sync import blocked_items, is_blocked  # noqa: E402
 
 S3, S4, OUT = env.output_dir("s3"), env.output_dir("s4"), env.output_dir("s5")
 
@@ -100,6 +101,7 @@ def main():
     comparison = list(csv.DictReader((S3 / "comparison.csv").open(encoding="utf-8-sig")))
 
     headers = [c[0] for c in COLUMNS]
+    blocked = blocked_items()
     rows = []
     for p in sorted(plan, key=lambda p: (p["expected_metadata"].get("dsitemcode", ""), p["file_name"])):
         e = ledger.get(p["file_name"], {})
@@ -107,6 +109,8 @@ def main():
         todo = open_actions(p, e)
         status = "in sync" if not [t for t in todo if not t.startswith("kept in")] else (
             "not in DAM" if not (e.get("dam_id") or p["dam_id"]) else "needs update")
+        if is_blocked(p, blocked):
+            status, todo = "excluded", ["blocked in config/skip_items.csv, not synced"]
         rows.append([fn(p, e, m) if fn else None for _, _, fn in COLUMNS[:-2]] + [status, "; ".join(todo)])
 
     wb = Workbook()
