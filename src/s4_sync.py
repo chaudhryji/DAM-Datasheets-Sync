@@ -24,7 +24,9 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -37,6 +39,7 @@ S1, S3, OUT = env.output_dir("s1"), env.output_dir("s3"), env.output_dir("s4")
 LEDGER = OUT / "ledger.json"
 PHASES = ["relocate", "replace", "upload", "metadata", "links"]
 CHECKPOINT_EVERY = 25
+LEDGER_LOCK = threading.RLock()  # workers update entries while the ledger is being saved
 
 
 def load_ledger() -> dict:
@@ -52,7 +55,9 @@ def load_ledger() -> dict:
 
 def save_ledger(ledger: dict):
     tmp = LEDGER.with_suffix(".tmp")
-    tmp.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+    with LEDGER_LOCK:
+        text = json.dumps(ledger, ensure_ascii=False)
+    tmp.write_text(text, encoding="utf-8")
     os.replace(tmp, LEDGER)
 
 
@@ -102,8 +107,9 @@ def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, 
         if args.limit:
             todo = todo[:args.limit]
         print(f"\n== {phase}: {len(todo):,} files")
-        t0 = time.monotonic()
-        for i, p in enumerate(todo, 1):
+        t0, done_n, lock = time.monotonic(), 0, LEDGER_LOCK
+
+        def do_one(p):
             e = entry(p)
             ctx = {"file": p["file_name"], "phase": phase}
             if phase == "relocate":
@@ -112,8 +118,7 @@ def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, 
                     live_links = [l for l in (dam.get(f"/file/{old_id}/link", allow_404=True) or []) if not l.get("expiresAt")]
                     if live_links:
                         dam.audit("relocate.skipped_linked", file_id=old_id, **ctx)
-                        stats["relocate skipped (has link now)"] += 1
-                        continue
+                        return "relocate skipped (has link now)"
                 data = graph.download(drive_id, p["spo_drive_item_id"]) if args.apply else b""
                 if args.apply and len(data) != p["spo_size"]:
                     raise SystemExit(f"Size mismatch downloading {p['file_name']}: {len(data)} != {p['spo_size']}")
@@ -123,12 +128,14 @@ def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, 
                         save_ledger(ledger)
                         raise SystemExit(f"STOP: upload of {path} did not give a new record of the right size: {rec}. "
                                          f"Old file {old_id} was NOT deleted.")
-                    e.update(dam_id=rec["id"], old_dam_id=old_id, old_folder=p["dam_folder"])
+                    with LEDGER_LOCK:
+                        e.update(dam_id=rec["id"], old_dam_id=old_id, old_folder=p["dam_folder"])
                 want = {k: dam_value(k, v) for k, v in p["expected_metadata"].items() if v}
                 dam.set_metadata(e["dam_id"], want, schema, current=None if args.apply else [], **ctx)
                 dam.delete_file(old_id, links=None if args.apply else [], **ctx)
                 if args.apply:
-                    e["done"].append("metadata")
+                    with LEDGER_LOCK:
+                        e["done"].append("metadata")
             elif phase in ("replace", "upload"):
                 folder = p["dam_folder"] if phase == "replace" else p["target_folder"]
                 path = folder + dam_name(p, args.name_mode)
@@ -142,7 +149,8 @@ def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, 
                         save_ledger(ledger)
                         raise SystemExit(f"STOP: replacing {path} created a new id ({rec['id']}), "
                                          f"expected {p['dam_id']}. Links may not follow. Investigate before continuing.")
-                    e["dam_id"] = rec["id"]
+                    with LEDGER_LOCK:
+                        e["dam_id"] = rec["id"]
             elif phase == "metadata":
                 # Existing files: only the keys step 3 flagged (outside tolerance) or stored twice.
                 # New uploads: every key.
@@ -154,18 +162,39 @@ def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, 
             elif phase == "links":
                 url = dam.ensure_link(e["dam_id"], links=None if args.apply else [], **ctx)
                 if url:
-                    e["link"] = url
-            stats[phase] += 1
-            if args.apply:
-                e["done"].append(phase)
-                e["ts"] = datetime.now(timezone.utc).isoformat()
-                if i % CHECKPOINT_EVERY == 0:
-                    save_ledger(ledger)
-            if i % args.progress == 0 or i == len(todo):
-                rate = i / max(time.monotonic() - t0, 1e-6)
-                eta = (len(todo) - i) / rate if rate else 0
-                print(f"  {i:,}/{len(todo):,} ({i / len(todo):.0%})  {rate * 60:,.0f} files/min  "
-                      f"~{eta / 60:,.0f} min left  last: {p['file_name']}", flush=True)
+                    with LEDGER_LOCK:
+                        e["link"] = url
+            return phase
+
+        def finished(p, result):
+            nonlocal done_n
+            with lock:
+                stats[result] += 1
+                done_n += 1
+                e = entry(p)
+                if args.apply and result == phase:
+                    e["done"].append(phase)
+                    e["ts"] = datetime.now(timezone.utc).isoformat()
+                    if done_n % CHECKPOINT_EVERY == 0:
+                        save_ledger(ledger)
+                if done_n % args.progress == 0 or done_n == len(todo):
+                    rate = done_n / max(time.monotonic() - t0, 1e-6)
+                    eta = (len(todo) - done_n) / rate if rate else 0
+                    print(f"  {done_n:,}/{len(todo):,} ({done_n / len(todo):.0%})  {rate * 60:,.0f} files/min  "
+                          f"~{eta / 60:,.0f} min left  last: {p['file_name']}", flush=True)
+
+        if args.workers <= 1:
+            for p in todo:
+                finished(p, do_one(p))
+        else:
+            with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                futures = {pool.submit(do_one, p): p for p in todo}
+                try:
+                    for f in as_completed(futures):
+                        finished(futures[f], f.result())  # a STOP in any worker ends the run
+                except BaseException:
+                    pool.shutdown(wait=True, cancel_futures=True)
+                    raise
         if args.apply:
             save_ledger(ledger)
 
@@ -176,6 +205,8 @@ def main():
     ap.add_argument("--apply", action="store_true", help="really write to the DAM (default: dry run)")
     ap.add_argument("--phase", choices=PHASES, action="append", help="run only these phases")
     ap.add_argument("--folder", help="only files whose target or current DAM folder is this, e.g. 'Ultrasync/'")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="files handled at the same time (default 1; 4 is a sensible maximum)")
     ap.add_argument("--progress", type=int, default=10, help="print a progress line every N files (default 10)")
     ap.add_argument("--ledger", help="progress file name for a run in a second window, e.g. 'uni' -> ledger_uni.json. "
                                      "Parallel runs must each use their own name and work on different folders.")

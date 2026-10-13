@@ -3,6 +3,7 @@
 Write calls (upload, metadata, links) will live in a separate client added in step 4,
 behind --dry-run. Keeping this class GET-only makes steps 2 and 3 safe by construction.
 """
+import threading
 import time
 
 import requests
@@ -15,15 +16,22 @@ class DamReader:
         self.base = env.get("DAM_API_BASE").rstrip("/")
         self.throttle = throttle
         self.timeout = timeout
-        self.session = requests.Session()
-        self.session.headers["x-api-key"] = env.get("DAM_API_KEY")
+        self.headers = {"x-api-key": env.get("DAM_API_KEY"), "Accept": "application/json"}
         email = env.get("DAM_USER_EMAIL", required=False)
         if email:
-            self.session.headers["user-email"] = email
+            self.headers["user-email"] = email
         domain = env.get("DAM_SITE_DOMAIN", required=False)
         if domain:
-            self.session.headers["site-domain"] = domain
-        self.session.headers["Accept"] = "application/json"
+            self.headers["site-domain"] = domain
+        self._local = threading.local()
+
+    @property
+    def session(self) -> requests.Session:
+        """One HTTP session per thread, so parallel workers do not share a connection pool."""
+        if not hasattr(self._local, "session"):
+            self._local.session = requests.Session()
+            self._local.session.headers.update(self.headers)
+        return self._local.session
 
     def get(self, path: str, params: dict | None = None, allow_404: bool = False):
         url = self.base + path

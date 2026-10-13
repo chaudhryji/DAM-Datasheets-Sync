@@ -8,6 +8,7 @@ Safety rules enforced here, not left to callers:
     an unlinked file is moved as upload-to-new-folder, verify, then delete the old record
 """
 import json
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -30,13 +31,14 @@ class DamWriter(DamReader):
         self.container = env.get("DAM_CONTAINER_ID")
         logs = env.ROOT / "logs"
         logs.mkdir(exist_ok=True)
+        self._audit_lock = threading.Lock()
         self.audit_path = logs / f"audit_{datetime.now(timezone.utc):%Y%m%d}.jsonl"
 
     # ---- plumbing -------------------------------------------------------------
     def audit(self, action: str, **details):
         rec = {"ts": datetime.now(timezone.utc).isoformat(), "mode": "APPLY" if self.apply else "DRY-RUN",
                "action": action, **details}
-        with self.audit_path.open("a", encoding="utf-8") as f:
+        with self._audit_lock, self.audit_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def _send(self, method: str, path: str, **kw):

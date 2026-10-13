@@ -1,5 +1,6 @@
 """Read-only Microsoft Graph client with delegated sign-in and a local token cache."""
 import atexit
+import threading
 import time
 
 import msal
@@ -50,13 +51,24 @@ class Graph:
     def __init__(self, device_code: bool = False, timeout: int = 60):
         self.device_code = device_code
         self.timeout = timeout
-        self.session = requests.Session()
+        self.headers = {}
+        self._local = threading.local()
+        self._lock = threading.Lock()
         self._auth()
 
+    @property
+    def session(self) -> requests.Session:
+        """One HTTP session per thread; headers are re-applied when the token is renewed."""
+        if not hasattr(self._local, "session"):
+            self._local.session = requests.Session()
+        self._local.session.headers.update(self.headers)
+        return self._local.session
+
     def _auth(self):
-        self.session.headers["Authorization"] = f"Bearer {_token(self.device_code)}"
-        # Lets Graph filter/page large lists on non-indexed columns.
-        self.session.headers["Prefer"] = "HonorNonIndexedQueriesWarningMayFailRandomly"
+        with self._lock:  # parallel workers may all see a 401 at once; sign in once
+            self.headers = {"Authorization": f"Bearer {_token(self.device_code)}",
+                            # Lets Graph filter/page large lists on non-indexed columns.
+                            "Prefer": "HonorNonIndexedQueriesWarningMayFailRandomly"}
 
     def get(self, url: str, params: dict | None = None) -> dict:
         if not url.startswith("http"):
