@@ -75,3 +75,19 @@ class Graph:
                 raise SystemExit(f"GET {url} -> HTTP {resp.status_code}: {resp.text[:500]}")
             return resp.json()
         raise SystemExit(f"GET {url} kept failing after retries")
+
+    def download(self, drive_id: str, item_id: str) -> bytes:
+        """Read a file's bytes from SharePoint. Read-only."""
+        url = f"{GRAPH}/drives/{drive_id}/items/{item_id}/content"
+        for attempt in range(6):
+            resp = self.session.get(url, timeout=self.timeout, allow_redirects=True)
+            if resp.status_code == 401 and attempt == 0:
+                self._auth()
+                continue
+            if resp.status_code in (429, 500, 502, 503, 504):
+                time.sleep(int(resp.headers.get("Retry-After", 2 ** attempt)))
+                continue
+            if not resp.ok:
+                raise RuntimeError(f"Download {item_id} -> HTTP {resp.status_code}")
+            return resp.content
+        raise RuntimeError(f"Download {item_id} kept failing")

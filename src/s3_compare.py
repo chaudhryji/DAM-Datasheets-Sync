@@ -10,7 +10,8 @@ DAM files that are not in SharePoint are reported as orphans and never touched h
 Matching: by file name, with SharePoint's literal "%C2%BD" read as "½" and case ignored,
 because the DAM stores the real "½" character.
 
-Outputs in data/output/s3/: comparison.csv (one row per file) and summary.md.
+Outputs in data/output/s3/: comparison.csv (one row per file), summary.md, and plan.jsonl
+(the same rows plus expected metadata, read by step 4).
 """
 import csv
 import json
@@ -107,7 +108,8 @@ def main():
         sources.append(group[0])
         stale += [(g, group[0]["FileLeafRef"]) for g in group[1:]]
 
-    rows, unmapped_pg = [], Counter()
+    older_twin = {src: g["FileLeafRef"] for g, src in stale}
+    rows, plan, unmapped_pg = [], [], Counter()
     seen_keys = set()
     for f in sources:
         name = f["FileLeafRef"]
@@ -136,7 +138,7 @@ def main():
                "dam_id": d["id"] if d else "", "dam_folder": d.get("folderPath", "") if d else "",
                "dam_size": d.get("sizeBytes") if d else "", "long_term_link": d["link_urls"][0] if d and d["link_urls"] else "",
                "dam_copies": len(matches),
-               "spo_older_twin": next((g["FileLeafRef"] for g, src in stale if src == name), "")}
+               "spo_older_twin": older_twin.get(name, "")}
         if not d:
             row.update(content="UPLOAD", placement="NEW", link="CREATE_LINK",
                        metadata_to_set=";".join(k2 for k2, v in expected.items() if v))
@@ -152,6 +154,9 @@ def main():
                                               if v and not same_value(k2, v, t(md.get(k2))))
             row["dup_metadata_keys"] = ";".join(d.get("dup_meta_keys") or [])
         rows.append(row)
+        plan.append({**row, "spo_drive_item_id": drive.get(name, {}).get("id"),
+                     "expected_metadata": {k2: v for k2, v in expected.items() if v},
+                     "dam_metadata": (d or {}).get("metadata") or {}})
 
     orphans = []
     for k, ds in dam_by_key.items():
@@ -173,6 +178,10 @@ def main():
         w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows + twins + orphans)
+
+    with (OUT / "plan.jsonl").open("w", encoding="utf-8") as f:
+        for p_ in plan:
+            f.write(json.dumps(p_, ensure_ascii=False) + "\n")
 
     # ---- summary ---------------------------------------------------------------
     c = Counter(r["content"] for r in rows)
