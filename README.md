@@ -37,5 +37,6 @@ Outputs land in `data/output/s1/` (git-ignored):
 | `spo_profile.csv` | Per field: fill rate, distinct values, top values |
 | `spo_profile.md` | Readable summary incl. data-quality checks |
 
-Sign-in uses the app registration in `SPO_CLIENT_ID` and only the SharePoint permissions it already
-has (same as PnP PowerShell), so no new consent is requested. It only reads (GET requests).
+Sign-in uses the app registration in `SPO_CLIENT_ID` with delegated `Sites.Read.All`
+(Microsoft Graph). It only reads. If the sign-in says the app lacks that permission,
+an admin needs to grant it to the app registration.

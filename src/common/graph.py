@@ -1,8 +1,4 @@
-"""Read-only SharePoint REST client with delegated sign-in and a local token cache.
-
-Uses the `.default` scope, so it only asks for the SharePoint permissions the app
-registration already has (the same ones PnP PowerShell uses). No new consent is requested.
-"""
+"""Read-only Microsoft Graph client with delegated sign-in and a local token cache."""
 import atexit
 import time
 
@@ -11,10 +7,12 @@ import requests
 
 from common import env
 
+GRAPH = "https://graph.microsoft.com/v1.0"
+SCOPES = ["https://graph.microsoft.com/Sites.Read.All"]
 CACHE_FILE = env.ROOT / ".cache" / "msal_token_cache.json"
 
 
-def _token(scopes: list[str], device_code: bool) -> str:
+def _token(device_code: bool) -> str:
     cache = msal.SerializableTokenCache()
     if CACHE_FILE.exists():
         cache.deserialize(CACHE_FILE.read_text())
@@ -32,39 +30,37 @@ def _token(scopes: list[str], device_code: bool) -> str:
         token_cache=cache,
     )
     accounts = app.get_accounts()
-    result = app.acquire_token_silent(scopes, account=accounts[0]) if accounts else None
+    result = app.acquire_token_silent(SCOPES, account=accounts[0]) if accounts else None
     if not result:
         if device_code:
-            flow = app.initiate_device_flow(scopes=scopes)
+            flow = app.initiate_device_flow(scopes=SCOPES)
             if "user_code" not in flow:
                 raise SystemExit(f"Device-code sign-in not available: {flow.get('error_description')}")
             print(flow["message"], flush=True)
             result = app.acquire_token_by_device_flow(flow)
         else:
-            result = app.acquire_token_interactive(scopes, prompt="select_account")
+            result = app.acquire_token_interactive(SCOPES, prompt="select_account")
     if "access_token" not in result:
         raise SystemExit(f"Sign-in failed: {result.get('error')}: {result.get('error_description')}")
     save()
     return result["access_token"]
 
 
-class SharePoint:
-    def __init__(self, device_code: bool = False, timeout: int = 120):
-        host = env.get("SPO_SITE_HOST")
-        self.web = f"https://{host}{env.get('SPO_SITE_PATH')}"
-        self.scopes = [f"https://{host}/.default"]
+class Graph:
+    def __init__(self, device_code: bool = False, timeout: int = 60):
         self.device_code = device_code
         self.timeout = timeout
         self.session = requests.Session()
-        self.session.headers["Accept"] = "application/json;odata=nometadata"
         self._auth()
 
     def _auth(self):
-        self.session.headers["Authorization"] = f"Bearer {_token(self.scopes, self.device_code)}"
+        self.session.headers["Authorization"] = f"Bearer {_token(self.device_code)}"
+        # Lets Graph filter/page large lists on non-indexed columns.
+        self.session.headers["Prefer"] = "HonorNonIndexedQueriesWarningMayFailRandomly"
 
     def get(self, url: str, params: dict | None = None) -> dict:
         if not url.startswith("http"):
-            url = self.web + url
+            url = GRAPH + url
         for attempt in range(8):
             resp = self.session.get(url, params=params, timeout=self.timeout)
             if resp.status_code == 401 and attempt == 0:

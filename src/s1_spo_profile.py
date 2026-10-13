@@ -62,20 +62,22 @@ def main():
                 seen_fields.add(k)
                 field_names.append(k)
         rows.append(fields)
-    file_rows = [r for r in rows if str(r.get("FSObjType")) != "1"]
+    file_rows = [r for r in rows if r.get("ContentType") != "Folder" and r.get("FSObjType") not in ("1", 1)]
     name_key = "FileLeafRef" if "FileLeafRef" in seen_fields else "LinkFilename"
 
-    out_cols = ["FileName", "file_size", "file_created", "file_modified", "file_modifiedBy",
-                "file_version", "file_url"] + field_names
+    out_cols = ["FileName", "drive_size", "drive_quickXorHash", "drive_sha256", "drive_created",
+                "drive_modified", "drive_modifiedBy", "drive_mimeType", "drive_webUrl"] + field_names
     with (OUT / "spo_items.csv").open("w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(out_cols)
         for r in file_rows:
             name = r.get(name_key, "")
             d = drive_by_name.get(name, {})
-            w.writerow([name, d.get("size", ""), d.get("createdDateTime", ""), d.get("lastModifiedDateTime", ""),
+            hashes = (d.get("file") or {}).get("hashes") or {}
+            w.writerow([name, d.get("size", ""), hashes.get("quickXorHash", ""), hashes.get("sha256Hash", ""),
+                        d.get("createdDateTime", ""), d.get("lastModifiedDateTime", ""),
                         ((d.get("lastModifiedBy") or {}).get("user") or {}).get("displayName", ""),
-                        (d.get("file") or {}).get("version", ""), d.get("webUrl", "")]
+                        (d.get("file") or {}).get("mimeType", ""), d.get("webUrl", "")]
                        + [as_text(r.get(k)) for k in field_names])
 
     # ---- per-field profile ----------------------------------------------------
@@ -139,8 +141,8 @@ def main():
           f"- Fields returned per item: {len(field_names)}; columns defined on library: {len(columns)}",
           "",
           "## Integrity checks",
-          f"- In list but not found in library: {len(only_list):,}" + (f" e.g. {only_list[:5]}" if only_list else ""),
-          f"- In library but not in list: {len(only_drive):,}" + (f" e.g. {only_drive[:5]}" if only_drive else ""),
+          f"- In list but not found in drive root: {len(only_list):,}" + (f" e.g. {only_list[:5]}" if only_list else ""),
+          f"- In drive root but not in list: {len(only_drive):,}" + (f" e.g. {only_drive[:5]}" if only_drive else ""),
           f"- Duplicate file names: {len(dup_names):,}" + (f" e.g. {dup_names[:5]}" if dup_names else ""),
           f"- Names that differ only by case: {len(ci_dups):,}" + (f" e.g. {ci_dups[:6]}" if ci_dups else ""),
           f"- Last modified by (drive): {', '.join(f'{e} ({n:,})' for e, n in editors.most_common(5))}",
