@@ -79,6 +79,16 @@ Phases run in order `replace`, `upload`, `metadata`, `links` (pick with `--phase
 
 Nothing is moved, renamed or deleted. Progress is in `data/output/s4/ledger.json`; a rerun skips what is done.
 
+### Files in the wrong folder
+The DAM's move endpoint (`POST /api/internal/file/move`) is internal (browser sign-in), so the DAM
+team runs the moves. This writes the request bodies for them, in batches of 200:
+```powershell
+python src/s4_move_list.py                   # unlinked files only
+python src/s4_move_list.py --include-linked  # add linked files, once a move test shows links survive
+```
+Output: `data/output/s4/move_requests.json` and `move_list.csv`. After the moves, re-run steps 2 and 3
+before `s4_sync.py`, so replaces go to the files' new paths.
+
 ## Step 5 - Master register
 ```powershell
 python src/s5_master_register.py
