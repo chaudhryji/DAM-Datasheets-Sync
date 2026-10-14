@@ -23,6 +23,7 @@ function Log([string]$text) { $text | Tee-Object -FilePath $log -Append }
 function Step([string]$title, [string[]]$arguments) {
     Log "`n### $title"
     # Every line the script prints goes to the console and the log (a transcript misses some of it).
+    $ErrorActionPreference = "Continue"  # a line on stderr (e.g. a retry notice) must not stop the run; the exit code decides
     & $python @arguments 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log -Append
     if ($LASTEXITCODE -ne 0) {
         Log "STOPPED: '$title' failed (exit $LASTEXITCODE). Later steps were not run."
@@ -31,6 +32,7 @@ function Step([string]$title, [string[]]$arguments) {
 }
 
 Log ("Started {0:yyyy-MM-dd HH:mm} ({1})" -f (Get-Date), $(if ($Apply) { "APPLY" } else { "dry run" }))
+$ErrorActionPreference = "Continue"
 git pull --ff-only 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log -Append
 Step "1 SharePoint inventory (read-only)" @("src/s1_spo_inventory.py", "--restart")
 Step "2 DAM inventory (read-only)" @("src/s2_dam_inventory.py", "--restart")
