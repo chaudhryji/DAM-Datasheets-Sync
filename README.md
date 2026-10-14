@@ -77,7 +77,7 @@ Phases run in order `replace`, `upload`, `metadata`, `links` (pick with `--phase
 - **metadata** sets each key to the SharePoint value exactly once; a key stored twice is collapsed.
 - **links** creates a long-term link only where none exists.
 
-Nothing is moved, renamed or deleted. Progress is in `data/output/s4/ledger.json`; a rerun skips what is done.
+Nothing is moved, renamed or deleted. Progress is in `data/output/s4/ledger.json`; a rerun skips what is done. After a new step 3 plan, the first `--apply` run moves the old progress files to `data/output/s4/archive/` and starts clean, so files SharePoint changed since are synced again.
 
 ### Files in the wrong folder
 Unlinked files in the wrong folder are moved by the `relocate` phase (it runs first): upload the

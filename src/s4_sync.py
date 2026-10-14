@@ -65,6 +65,22 @@ def load_ledger() -> dict:
     return merged
 
 
+def archive_stale_ledgers():
+    """The ledger only resumes work within one plan. When step 3 has written a newer plan (after a
+    fresh crawl), files finished in an earlier run may need work again (SharePoint changed them since),
+    so the old progress files are moved to archive/<time>/ and the new plan starts clean.
+    Redoing a step is safe: replace and upload write in place, metadata and links skip what is already right."""
+    ledgers = list(OUT.glob("ledger*.json"))
+    plan = S3 / "plan.jsonl"
+    if not ledgers or plan.stat().st_mtime <= max(f.stat().st_mtime for f in ledgers):
+        return
+    dest = OUT / "archive" / datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    dest.mkdir(parents=True)
+    for f in ledgers:
+        f.replace(dest / f.name)
+    print(f"New step 3 plan found: previous progress files moved to {dest}")
+
+
 def save_ledger(ledger: dict):
     tmp = LEDGER.with_suffix(".tmp")
     with LEDGER_LOCK:
@@ -281,6 +297,8 @@ def main():
         plan = [p for p in plan if args.folder in (p["target_folder"], p["dam_folder"])]
     dam = DamWriter(apply=args.apply)
     schema = {s["key"]: s["id"] for s in dam.get("/metadata-schema")}
+    if args.apply:
+        archive_stale_ledgers()
     ledger = load_ledger() if args.apply else {}
     graph, drive_id = None, None
     if args.apply and {"relocate", "replace", "upload"} & set(phases):
