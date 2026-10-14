@@ -101,3 +101,11 @@ and 3 first so every id and link is read back from the DAM.
 ## Recurring run
 `s1_spo_inventory` -> `s2_dam_inventory` -> `s3_compare` -> review `summary.md` ->
 `s4_sync --apply` -> `s2_dam_inventory` -> `s3_compare` -> `s5_master_register`.
+
+`scripts/daily_sync.ps1` runs this chain and stops at the first failing step (log in `logs/daily_<date>.log`).
+Without `-Apply` it is a dry run that writes nothing to the DAM. To schedule it every morning at 06:00:
+```powershell
+$a = New-ScheduledTaskAction -Execute "pwsh.exe" -Argument "-NoProfile -File C:\Scripts\DAM-Datasheets-Sync\scripts\daily_sync.ps1" -WorkingDirectory "C:\Scripts\DAM-Datasheets-Sync"
+Register-ScheduledTask -TaskName "DAM datasheet sync" -Action $a -Trigger (New-ScheduledTaskTrigger -Daily -At 6am)
+```
+Add ` -Apply` after `daily_sync.ps1` in the argument once the daily dry runs look routine.
