@@ -48,11 +48,20 @@ LEDGER_LOCK = threading.RLock()  # workers update entries while the ledger is be
 def load_ledger() -> dict:
     """Merge ledger.json and every ledger_<name>.json (written by parallel runs).
     For a file seen in several, the entry with the most finished phases wins."""
-    merged = {}
+    seen = {}
     for f in sorted(OUT.glob("ledger*.json")):
         for k, v in json.loads(f.read_text(encoding="utf-8")).items():
-            if k not in merged or len(v.get("done", [])) > len(merged[k].get("done", [])):
-                merged[k] = v
+            seen.setdefault(k, []).append(v)
+    merged = {}
+    for k, vs in seen.items():
+        # Ids come from the entry with the most finished phases; done is the union of all runs
+        # (two windows can each finish a different phase for the same file, e.g. metadata and links).
+        base = dict(max(vs, key=lambda v: len(v.get("done", []))))
+        base["done"] = list(dict.fromkeys(d for v in vs for d in v.get("done", [])))
+        base["link"] = base.get("link") or next((v["link"] for v in vs if v.get("link")), None)
+        if base["link"] is None:
+            del base["link"]
+        merged[k] = base
     return merged
 
 
