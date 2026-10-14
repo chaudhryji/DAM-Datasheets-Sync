@@ -1,5 +1,5 @@
 <#
-Daily datasheet sync, for Windows Task Scheduler.
+Scheduled datasheet sync (weekly, Monday 10:00 local), for Windows Task Scheduler.
 
   .\scripts\daily_sync.ps1           # dry run: refresh SharePoint + DAM, compare, dry-run s4, rebuild the Excel
   .\scripts\daily_sync.ps1 -Apply    # also write to the DAM, then re-crawl and rebuild the Excel
