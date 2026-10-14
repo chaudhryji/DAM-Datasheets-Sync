@@ -141,7 +141,11 @@ def main():
     xlsx = OUT / "datasheet_register.xlsx"
     tmp = xlsx.with_suffix(".tmp.xlsx")
     wb.save(tmp)
-    tmp.replace(xlsx)
+    try:
+        tmp.replace(xlsx)
+    except PermissionError:
+        tmp.unlink(missing_ok=True)
+        raise SystemExit(f"{xlsx.name} is open (probably in Excel). Close it and run this step again.")
     with (OUT / "datasheet_register.csv").open("w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f)
         w.writerow(headers)
