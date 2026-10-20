@@ -75,6 +75,11 @@ Phases run in order `replace`, `upload`, `metadata`, `links` (pick with `--phase
   the same. It stops at once if the DAM returns a different file id.
 - **upload** adds new datasheets to their target folder (`½` in the name, like the existing files).
 - **metadata** sets each key to the SharePoint value exactly once; a key stored twice is collapsed.
+  Field names follow the DAM schema of 19 Oct 2026 (`src/common/metadata_map.py`: productcode,
+  description, language, templatecode, proofread, sourcerecordid, sourcecreated, sourcemodified,
+  productfamily, pageformat). DAM-team fields (access level, rights, asset type, ...) are never
+  changed on existing files; new uploads copy them from same-item-code files only with `--copy-dam-fields`.
+  s4 stops if any of these fields is missing from the live schema.
 - **links** creates a long-term link only where none exists.
 
 Nothing is moved, renamed or deleted. Progress is in `data/output/s4/ledger.json`; a rerun skips what is done. After a new step 3 plan, the first `--apply` run moves the old progress files to `data/output/s4/archive/` and starts clean, so files SharePoint changed since are synced again.

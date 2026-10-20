@@ -7,7 +7,10 @@ Phases (run in this order; each is resumable and can be run on its own with --ph
   replace   changed content: upload the SharePoint PDF to the file's CURRENT DAM path, so the
             same record (and its long-term link) is updated in place. Stops if the id changes.
   upload    new datasheets: upload to the target folder.
-  metadata  set every ds* key to the SharePoint value, exactly once per key (no duplicates).
+  metadata  set each sync-owned DAM field (common/metadata_map.py) to the SharePoint value,
+            exactly once per key (no duplicates). DAM-team fields (access level, rights, ...)
+            are never changed on existing files; new uploads copy them from files of the same
+            item code only with --copy-dam-fields.
   links     create a long-term link where none exists; existing links are never touched.
 
 Not done here: moving linked files (they keep their place; their metadata is corrected) and
@@ -37,6 +40,7 @@ import requests
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import env  # noqa: E402
 from common.dam_writer import PROTECTED_ROOTS, DamWriter  # noqa: E402
+from common.metadata_map import DAM_KEYS, DAM_MANAGED, dam_value  # noqa: E402
 
 S1, S3, OUT = env.output_dir("s1"), env.output_dir("s3"), env.output_dir("s4")
 LEDGER = OUT / "ledger.json"
@@ -110,16 +114,6 @@ def dam_name(row: dict, name_mode: str) -> str:
     return row["file_name"].replace("%C2%BD", "½") if name_mode == "decode" else row["file_name"]
 
 
-def dam_value(key: str, value: str) -> str:
-    """Format a SharePoint value the way the DAM stores it."""
-    if key in ("dscreated", "dsmodified"):
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
-        return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    if key == "dsitemno":
-        return value.lstrip("0") or "0"
-    return value
-
-
 def snapshot_md(p: dict) -> list:
     """Dry run: the DAM metadata as crawled in step 2, shaped like GET /file/:id/metadata,
     so a full dry run needs no per-file API calls. --apply always re-reads live."""
@@ -188,7 +182,10 @@ def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, 
                                          f"Old file {old_id} was NOT deleted.")
                     with LEDGER_LOCK:
                         e.update(dam_id=rec["id"], old_dam_id=old_id, old_folder=p["dam_folder"])
-                want = {k: dam_value(k, v) for k, v in p["expected_metadata"].items() if v}
+                # The new record gets the old record's DAM-team fields, then the SharePoint values.
+                old_md = (dam.get(f"/file/{old_id}/metadata", allow_404=True) or []) if args.apply else snapshot_md(p)
+                want = {m["key"]: m["value"] for m in old_md if m.get("key") in DAM_MANAGED and m.get("value")}
+                want.update({k: dam_value(k, v) for k, v in p["dam_expected"].items()})
                 dam.set_metadata(e["dam_id"], want, schema, current=None if args.apply else [], **ctx)
                 dam.delete_file(old_id, links=None if args.apply else [], **ctx)
                 if args.apply:
@@ -212,8 +209,9 @@ def run_phases(phases, plan, args, dam, schema, ledger, graph, drive_id, stats, 
                 # New uploads: every key.
                 keys = None if p["content"] == "UPLOAD" else set(
                     filter(None, (p["metadata_to_set"] + ";" + p.get("dup_metadata_keys", "")).split(";")))
-                want = {k: dam_value(k, v) for k, v in p["expected_metadata"].items()
-                        if v and (keys is None or k in keys)}
+                want = {k: dam_value(k, v) for k, v in p["dam_expected"].items() if keys is None or k in keys}
+                if keys is None and args.copy_dam_fields:
+                    want.update(p.get("dam_inherited") or {})
                 dam.set_metadata(e["dam_id"], want, schema, current=None if args.apply else snapshot_md(p), **ctx)
             elif phase == "links":
                 url = dam.ensure_link(e["dam_id"], links=None if args.apply else [], **ctx)
@@ -279,6 +277,9 @@ def main():
     ap.add_argument("--limit", type=int, help="stop after this many files per phase")
     ap.add_argument("--name-mode", choices=["decode", "keep"], default="decode",
                     help="new uploads: write '%%C2%%BD' as '½' like the existing DAM files (default) or keep as-is")
+    ap.add_argument("--copy-dam-fields", action="store_true",
+                    help="new uploads: also copy the DAM-team fields (access level, rights, brand, ...) from "
+                         "DAM files of the same item code, where they all agree (see step 3 summary)")
     args = ap.parse_args()
     phases = args.phase or PHASES
     if args.ledger:
@@ -286,6 +287,8 @@ def main():
         LEDGER = OUT / f"ledger_{''.join(c for c in args.ledger if c.isalnum() or c in '-_')}.json"
 
     plan = [json.loads(l) for l in (S3 / "plan.jsonl").open(encoding="utf-8")]
+    if plan and "dam_expected" not in plan[0]:
+        raise SystemExit("The step 3 plan uses the old field names. Run python src/s3_compare.py first.")
     plan = [p for p in plan if not ({p["target_folder"].split("/", 1)[0] + "/", p["dam_folder"].split("/", 1)[0] + "/"}
                                     & PROTECTED_ROOTS)]
     blocked = blocked_items()
@@ -297,6 +300,10 @@ def main():
         plan = [p for p in plan if args.folder in (p["target_folder"], p["dam_folder"])]
     dam = DamWriter(apply=args.apply)
     schema = {s["key"]: s["id"] for s in dam.get("/metadata-schema")}
+    missing = [k for k in DAM_KEYS if k not in schema]
+    if missing:
+        raise SystemExit(f"STOP: the DAM metadata schema has no field {', '.join(missing)}. "
+                         "The field names changed again; nothing was written.")
     if args.apply:
         archive_stale_ledgers()
     ledger = load_ledger() if args.apply else {}

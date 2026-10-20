@@ -51,6 +51,7 @@ def main():
     plan = find(S3 / "plan.jsonl", name, "file_name")
     if plan:
         show("step 3 expected from SharePoint", plan.get("expected_metadata"))
+        show("step 3 to write, DAM field names", plan.get("dam_expected"))
         print("\nmetadata_to_set:", plan.get("metadata_to_set"))
 
 

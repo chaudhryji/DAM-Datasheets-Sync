@@ -3,7 +3,7 @@
 For every datasheet it decides what the sync would have to do, without doing it:
   content   UPLOAD (not in DAM) | REPLACE (size differs) | SAME
   placement OK | MOVE (wrong folder, no link) | KEEP_PROTECTED (wrong folder, has long-term link)
-  metadata  list of ds* keys to add or correct
+  metadata  list of DAM keys to add or correct (DAM field names since 19 Oct 2026, see common/metadata_map.py)
   link      HAS_LINK | CREATE_LINK
 DAM files that are not in SharePoint are reported as orphans and never touched here.
 
@@ -12,22 +12,23 @@ because the DAM stores the real "½" character.
 
 Outputs in data/output/s3/: comparison.csv (one row per file), summary.md, and plan.jsonl
 (the same rows plus expected metadata, read by step 4).
+expected_metadata is the SharePoint view (ds* names, used by the register); dam_expected is
+the same data under the DAM's field names, which is what step 4 writes.
 """
 import csv
 import json
 import re
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from common import env  # noqa: E402
+from common.metadata_map import DAM_KEYS, DAM_MANAGED, same_value, to_dam  # noqa: E402
 
 S1, S2, OUT = env.output_dir("s1"), env.output_dir("s2"), env.output_dir("s3")
 CONFIG = env.ROOT / "config"
 SPO_NAME = re.compile(r"^.+_.+_[A-Z]{3}_(A4|LTR)\.PDF$", re.I)
-DATE_TOLERANCE_S = 2 * 3600  # earlier loads shifted UTC by 1-2 h (CET/CEST); not a real change
 
 
 def read_jsonl(path: Path):
@@ -50,20 +51,17 @@ def t(v) -> str:
     return (v or "").strip() if isinstance(v, str) else ("" if v is None else str(v))
 
 
-def parse_dt(v: str):
-    try:
-        return datetime.fromisoformat(v.replace("Z", "+00:00")).astimezone(timezone.utc)
-    except (ValueError, AttributeError):
-        return None
-
-
-def same_value(k: str, expected: str, actual: str) -> bool:
-    if k in ("dscreated", "dsmodified"):
-        a, b = parse_dt(expected), parse_dt(actual)
-        return bool(a and b and abs((a - b).total_seconds()) <= DATE_TOLERANCE_S)
-    if k == "dsitemno":  # DAM stores it without leading zeros
-        return expected.lstrip("0") == actual.lstrip("0")
-    return expected == actual
+def inherited_fields(row_expected: dict, siblings: list) -> dict:
+    """DAM-managed values for a new upload, copied from DAM files of the same item code.
+    Prefers files of the same type code; a key is copied only when all those files agree."""
+    same_type = [d for d in siblings if (d.get("metadata") or {}).get("dstypecode") == row_expected.get("dstypecode")]
+    pool = same_type or siblings
+    out = {}
+    for k in DAM_MANAGED:
+        vals = {(d.get("metadata") or {}).get(k) for d in pool}
+        if len(vals) == 1 and None not in vals and "" not in vals:
+            out[k] = vals.pop()
+    return out
 
 
 def main():
@@ -92,9 +90,12 @@ def main():
             pg = next((o["enu_product_group"] for o in overrides if code.startswith(o["item_code_prefix"])), None)
         return folders.get(pg.casefold()) if pg else None
 
-    dam_by_key = defaultdict(list)
+    dam_by_key, dam_by_code = defaultdict(list), defaultdict(list)
     for d in dam_files:
         dam_by_key[key(d["name"])].append(d)
+        code = (d.get("metadata") or {}).get("productcode")
+        if code:
+            dam_by_code[code].append(d)
 
     # Since Sep 2026 the generator writes some files as "%C2%BD" next to the older "½" file
     # with the same name. Both mean the same datasheet: the newest one is the source.
@@ -109,7 +110,7 @@ def main():
         stale += [(g, group[0]["FileLeafRef"]) for g in group[1:]]
 
     older_twin = {src: g["FileLeafRef"] for g, src in stale}
-    rows, plan, unmapped_pg = [], [], Counter()
+    rows, plan, unmapped_pg, unmapped_val, inherit_stats = [], [], Counter(), Counter(), Counter()
     seen_keys = set()
     for f in sources:
         name = f["FileLeafRef"]
@@ -128,6 +129,8 @@ def main():
             "dsproductgroup": tgt["dsproductgroup"] if tgt else "",
             "dssubproductgroup": tgt["dssubproductgroup"] if tgt else "",
         }
+        dam_expected, unmapped = to_dam(expected)
+        unmapped_val.update(unmapped)
         matches = dam_by_key.get(k, [])
         # Prefer the copy that has a link, then the one already in the right folder.
         matches = sorted(matches, key=lambda d: (not d["link_urls"], d.get("folderPath") != (tgt or {}).get("dam_folder")))
@@ -139,9 +142,14 @@ def main():
                "dam_size": d.get("sizeBytes") if d else "", "long_term_link": d["link_urls"][0] if d and d["link_urls"] else "",
                "dam_copies": len(matches),
                "spo_older_twin": older_twin.get(name, "")}
+        inherited = {}
         if not d:
             row.update(content="UPLOAD", placement="NEW", link="CREATE_LINK",
-                       metadata_to_set=";".join(k2 for k2, v in expected.items() if v))
+                       metadata_to_set=";".join(dam_expected))
+            inherited = inherited_fields(expected, dam_by_code.get(expected["dsitemcode"], []))
+            inherit_stats["with a same-item-code DAM file" if dam_by_code.get(expected["dsitemcode"])
+                          else "new item code (nothing to copy)"] += 1
+            inherit_stats.update(f"copy {k2}" for k2 in inherited)
         else:
             row["content"] = "SAME" if sizes.get(name) == d.get("sizeBytes") else "REPLACE"
             if not tgt or d.get("folderPath") == tgt["dam_folder"]:
@@ -150,12 +158,14 @@ def main():
                 row["placement"] = "KEEP_PROTECTED" if d["link_urls"] else "MOVE"
             row["link"] = "HAS_LINK" if d["link_urls"] else "CREATE_LINK"
             md = d.get("metadata") or {}
-            row["metadata_to_set"] = ";".join(k2 for k2, v in expected.items()
-                                              if v and not same_value(k2, v, t(md.get(k2))))
-            row["dup_metadata_keys"] = ";".join(d.get("dup_meta_keys") or [])
+            row["metadata_to_set"] = ";".join(k2 for k2, v in dam_expected.items()
+                                              if not same_value(k2, v, t(md.get(k2))))
+            # Only keys this sync owns; DAM-managed keys (e.g. several certifications) are left alone.
+            row["dup_metadata_keys"] = ";".join(k2 for k2 in d.get("dup_meta_keys") or [] if k2 in DAM_KEYS)
         rows.append(row)
         plan.append({**row, "spo_drive_item_id": drive.get(name, {}).get("id"),
                      "expected_metadata": {k2: v for k2, v in expected.items() if v},
+                     "dam_expected": dam_expected, "dam_inherited": inherited,
                      "dam_metadata": (d or {}).get("metadata") or {}})
 
     orphans = []
@@ -213,10 +223,17 @@ def main():
            f"- Need a new link (incl. uploads): **{lk['CREATE_LINK']:,}**",
            "", "## Metadata corrections on files already in the DAM", "| Key | Files to update |", "|---|---|"]
     md += [f"| {k2} | {n:,} |" for k2, n in meta_keys.most_common()]
+    if unmapped_val:
+        md += ["", "SharePoint values with no DAM option (not written): "
+               + ", ".join(f"{k2} ({n:,})" for k2, n in unmapped_val.most_common())]
     md += [f"\nFiles with a metadata key stored twice: {sum(1 for r in in_dam if r.get('dup_metadata_keys')):,}",
            f"\nSharePoint files with more than one copy in the DAM: {sum(1 for r in rows if r['dam_copies'] > 1):,}",
            "", "## Uploads by target folder", "| Folder | Files |", "|---|---|"]
     md += [f"| {k2} | {n:,} |" for k2, n in uploads.most_common()]
+    if inherit_stats:
+        md += ["", "### DAM-team fields for new uploads (copied only with s4 --copy-dam-fields)",
+               "| | Files |", "|---|---|"]
+        md += [f"| {k2} | {n:,} |" for k2, n in sorted(inherit_stats.items())]
     md += ["", "## DAM files not in SharePoint (orphans, left untouched)", "| Origin | Has link | Files |", "|---|---|---|"]
     md += [f"| {o} | {'yes' if l else 'no'} | {n:,} |" for (o, l), n in oc.most_common()]
     if unmapped_pg:
