@@ -106,6 +106,8 @@ and 3 first so every id and link is read back from the DAM.
 Without `-Apply` it is a dry run that writes nothing to the DAM. To schedule it every Monday at 10:00 (the laptop's local time):
 ```powershell
 $a = New-ScheduledTaskAction -Execute "pwsh.exe" -Argument "-NoProfile -File C:\Scripts\DAM-Datasheets-Sync\scripts\daily_sync.ps1" -WorkingDirectory "C:\Scripts\DAM-Datasheets-Sync"
-Register-ScheduledTask -TaskName "DAM datasheet sync" -Action $a -Trigger (New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At 10am)
+$t = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday -At 10am
+$t.StartBoundary = (Get-Date "10:00").ToString("s")   # no UTC offset, so 10:00 stays 10:00 after the clocks change
+Register-ScheduledTask -TaskName "DAM datasheet sync" -Action $a -Trigger $t
 ```
 Add ` -Apply` after `daily_sync.ps1` in the argument once the weekly dry runs look routine.
